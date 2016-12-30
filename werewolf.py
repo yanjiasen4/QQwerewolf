@@ -32,7 +32,8 @@ GAMESTATE = {
     'WITCH_TURN_2': 6,
     'SEER_TURN': 7,
     'DAY': 8,
-    'VOTE': 9
+    'VOTE': 9,
+    'ROUND_OVER': 10
 }
 GAMEMODE = {
     'SLAY_PART': 1,
@@ -52,6 +53,7 @@ CMDTABLE = {
     'vote': '!v',
     'execute': '!exe',
     'shot': '!shot',
+    'list': '!player',
     #DEBUG CMD
     'show': '!show'
 }
@@ -84,7 +86,7 @@ HELPTABLE = {
     'seer': '请选择今晚你想查验身份的人，输入 !check玩家编号 来执行',
     'witch1': '你有一瓶解药，要用吗？输入 !heal 来执行，输入 !no 放弃',
     'witch2': '你有一瓶毒药，要用它来毒死谁吗？输入 !poison玩家编号 来执行，输入 !no 放弃',
-    'hunter': '很不幸，我们的猎人死了，他可以选择带走一个玩家。输入 !shot玩家编号 执行，输入 !giveup 放弃'
+    'hunter': '因为上帝比较懒，所以希望你记住自己的职责:\n如果在白天，你得知自己死了后，想要发动自己的技能带走一个人，请输入 !shot玩家编号 来执行'
 }
 
 class Player(object):
@@ -115,7 +117,7 @@ class Player(object):
 class WereWolf(object):
 
     def __init__(self):
-        self._key_regex = re.compile("^!start|!ge|!me|!kill|!heal|!poison|!no|!check|!v|!exe|!shot|!show")
+        self._key_regex = re.compile("^!start|!ge|!me|!kill|!heal|!poison|!no|!check|!v|!exe|!shot|!player|!show")
         self.state = GAMESTATE['IDLE']
         self.pre_state = GAMESTATE['INIT']
         self.rolesNum = 0
@@ -158,6 +160,9 @@ class WereWolf(object):
         # special cmd
         if cmd == CMDTABLE['show']:
             if self.state != GAMESTATE['IDLE']:
+                mode, reply = self.do_show_player_info_detail()
+        elif cmd == CMDTABLE['list']:
+            if self.state > GAMESTATE['WAITING']:
                 mode, reply = self.do_show_player_info()
         
         if self.state == GAMESTATE['IDLE']:
@@ -178,7 +183,7 @@ class WereWolf(object):
                     reply = "未知错误"
             if cmd == CMDTABLE['query_role']:
                 if isinstance(msg, PrivateMsg):
-                    player = self.get_player(id)
+                    player = self.get_player_by_id(id)
                     if player:
                         if player.player_uin is None:
                             logger.info(msg.from_uin)
@@ -202,13 +207,16 @@ class WereWolf(object):
             elif cmd == CMDTABLE['giveup'] and isinstance(msg, PrivateMsg):
                 self.next_state()
                 self.gen_active_content()
-                mode = 1
+                if self.state == GAMESTATE['DAY']:
+                    mode = 2
+                else:
+                    mode = 1
         elif self.state == GAMESTATE['SEER_TURN']:
             if cmd == CMDTABLE['check'] and isinstance(msg, PrivateMsg):
                 mode, reply = self.do_check(int(para))
         elif self.state == GAMESTATE['DAY']:
             if cmd == CMDTABLE['police'] and isinstance(msg, GroupMsg):
-                mode, reply = self.do_become_sheriff(nid)
+                mode, reply = self.do_become_sheriff(id)
         elif self.state == GAMESTATE['VOTE']:
             if cmd == CMDTABLE['execute'] and isinstance(msg, GroupMsg):
                 mode, reply = self.do_execute(nid)
@@ -254,7 +262,7 @@ class WereWolf(object):
             logger.info(content)
             return 0, content
         else:
-            if self.get_player(id) is None:
+            if self.get_player_by_id(id) is None:
                 player = Player(card, name, id, len(self.players)+1, self.roles_pool.pop())
                 self.players.append(player)
                 needPlayers = needPlayers - 1
@@ -268,7 +276,7 @@ class WereWolf(object):
             return 0, content
 
     def do_query_role(self, id):
-        player = self.get_player(id)
+        player = self.get_player_by_id(id)
         if player:
             player.player_confirm = True
             self.confirmNum = self.confirmNum + 1
@@ -330,7 +338,7 @@ class WereWolf(object):
     def do_poison(self, nid):
         if self.poison == False:
             return 0, "你的毒药已经用完了"
-        player = self.get_player(nid)
+        player = self.get_player_by_nid(nid)
         content = ""
         if player:
             if player.player_state != PLAYERSTATE['dead']:
@@ -346,7 +354,7 @@ class WereWolf(object):
         return 0, content
     
     def do_check(self, nid):
-        player = self.get_player(nid)
+        player = self.get_player_by_nid(nid)
         content = str(player.player_nid) + "号玩家:" + player.player_name + " 是 "
         if player:
             if player.player_state != PLAYERSTATE['dead']:
@@ -361,12 +369,14 @@ class WereWolf(object):
                 content = "死人是不会说话的......\n请重新选择你要查验的对象\n" + HELPTABLE['seer']
         return 0, content
 
-    def do_become_sheriff(self, nid):
-        player = self.get_player(nid)
+    def do_become_sheriff(self, id):
+        if self.sheriff_nid != -1:
+            return 0, "已经选过警长了"
+        player = self.get_player_by_id(id)
         content = ""
         if player:
             if player.player_state != PLAYERSTATE['dead']:
-                self.sheriff_nid = nid
+                self.sheriff_nid = player_player_nid
                 content = str(player.player_nid) + "号玩家:" + player.player_name + "成为了警长\n"
                 self.next_state()
                 self.gen_active_content()
@@ -387,12 +397,12 @@ class WereWolf(object):
         if player.player_state != PLAYERSTATE['alive']:
             return 0, str(player.player_nid) + "号玩家已经死啦，不要鞭尸啦"
         else:
-            player.player_state = PLAYERSTATE['dead']:
+            player.player_state = PLAYERSTATE['dead']
             return 0, str(player.player_nid) + "号玩家被猎人一枪崩死，真是惨"
         return 0, ""
 
     def do_execute(self, nid):
-        player = self.get_player(nid)
+        player = self.get_player_by_nid(nid)
         content = ""
         if player:
             content = str(nid) + "号玩家被投票处死 "
@@ -400,6 +410,10 @@ class WereWolf(object):
             self.next_state()
         else:
             content = "输入玩家序号不存在，请重新输入"
+        return 0, content
+
+    def do_show_player_info(self):
+        content = self.get_player_info(0)
         return 0, content
 
     def judge_win(self):
@@ -451,22 +465,24 @@ class WereWolf(object):
     
     def next_state(self):
         self.pre_state = self.state
-        if self.state == GAMESTATE['NIGHT']:
-            if len(self.get_player_by_role('witch')) == 0:
-                self.state = GAMESTATE['SEER_TURN'] - 1
-        if self.state == GAMESTATE['SEER_TURN']:
-            if len(self.get_player_by_role('seer')) == 0:
-                self.state = GAMESTATE['DAY'] - 1
-        if self.state == GAMESTATE['EXECUTE']:
-            self.round = self.round + 1
-            self.state = GAMESTATE['NIGHT'] - 1
         self.state = self.state + 1
+        if self.state == GAMESTATE['WITCH_TURN_1']:
+            witch = self.get_player_witch()
+            if not witch or witch.player_state == PLAYERSTATE['dead']:
+                self.state = GAMESTATE['SEER_TURN']
+        if self.state == GAMESTATE['SEER_TURN']:
+            seer = self.get_player_seer()
+            if not seer or seer.player_state == PLAYERSTATE['dead']:
+                self.state = GAMESTATE['DAY']
+        if self.state == GAMESTATE['ROUND_OVER']:
+            self.round = self.round + 1
+            self.state = GAMESTATE['NIGHT']
 
     def shuffle_roles(self):
         '''洗牌'''
         shuffle(self.roles_pool)
 
-    def get_player(self, id):
+    def get_player_by_id(self, id):
         logger.info("query id: " + str(id))
         for player in self.players:
             logger.info(player.player_id)
@@ -518,6 +534,27 @@ class WereWolf(object):
             if player.player_role == role:
                 players.append(player)
         return players
+    
+    def get_player_witch(self):
+        witch = self.get_player_by_role('witch')
+        if witch:
+            return witch[0]
+        else:
+            return None
+
+    def get_player_seer(self):
+        seer = self.get_player_by_role('seer')
+        if seer:
+            return seer[0]
+        else:
+            return None
+
+    def get_player_hunter(self):
+        hunter = self.get_player_by_role('hunter')
+        if hunter:
+            return hunter[0]
+        else:
+            return None 
 
     def get_player_killed(self):
         for player in self.players:
@@ -572,12 +609,13 @@ class WereWolf(object):
                 return False
         return True
 
-    def do_show_player_info(self):
+    def do_show_player_info_detail(self):
         content = self.get_player_info(1)
-        return 1, content
+        return 0, content
     
+    @property
     def get_group_code(self):
-        pass
+        return self.group_code
 
     def get_player_info(self, mode=0):
         if mode == 0:
@@ -592,9 +630,6 @@ class WereWolf(object):
 
     def run(self, msg, id):
         return self.parseAndExcuteMsg(msg, id)
-
-    def startGame(self):
-        pass
 
 wwBot = WereWolf()
 
@@ -619,7 +654,6 @@ def wereWolfBot(msg, bot):
     if mode == 0:
         pass
     elif mode == 1:
-        logger.info("???")
         logger.info(wwBot.active_content)
         logger.info(wwBot.active_receiver)
         for recevier in wwBot.active_receiver:
@@ -629,7 +663,6 @@ def wereWolfBot(msg, bot):
         logger.info(wwBot.active_content)
         logger.info(wwBot.active_receiver)
         msg_id = randint(1,10000)
-        bot.send_group_msg(wwBot.active_content, recevier, msg_id)
+        bot.send_group_msg(wwBot.active_content, wwBot.active_receiver, msg_id)
     elif expression:
         pass
-
